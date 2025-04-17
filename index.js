@@ -1,75 +1,40 @@
-/**
- * Copyright 2023 Google Inc. All Rights Reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the 'License');
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an 'AS IS' BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-"use strict";
+require("dotenv").config();
+const functions = require("firebase-functions");
+const admin = require("firebase-admin");
+const express = require("express");
+const cors = require("cors");
+const { decodeSigil } = require("./openai");
 
-// [START all]
-// [START import]
-// The Cloud Functions for Firebase SDK to create Cloud Functions and triggers.
-const {logger} = require("firebase-functions");
-const {onRequest} = require("firebase-functions/v2/https");
-const {onDocumentCreated} = require("firebase-functions/v2/firestore");
+admin.initializeApp();
+const db = admin.firestore();
+const app = express();
+app.use(cors({ origin: true }));
+app.use(express.json());
 
-// The Firebase Admin SDK to access Firestore.
-const {initializeApp} = require("firebase-admin/app");
-const {getFirestore} = require("firebase-admin/firestore");
+// 🔮 主路由：接收 sigil → 解码 → 返回频率回应
+app.post("/processSigil", async (req, res) => {
+  const { userId, sigil } = req.body;
 
-initializeApp();
-// [END import]
+  // 存储用户提交的 sigil
+  const sigilRef = await db.collection("sigils").add({
+    userId,
+    sigil,
+    createdAt: new Date(),
+  });
 
-// [START addmessage]
-// Take the text parameter passed to this HTTP endpoint and insert it into
-// Firestore under the path /messages/:documentId/original
-// [START addmessageTrigger]
-exports.addmessage = onRequest(async (req, res) => {
-  // [END addmessageTrigger]
-  // Grab the text parameter.
-  const original = req.query.text;
-  // [START adminSdkAdd]
-  // Push the new message into Firestore using the Firebase Admin SDK.
-  const writeResult = await getFirestore()
-      .collection("messages")
-      .add({original: original});
-  // Send back a message that we've successfully written the message
-  res.json({result: `Message with ID: ${writeResult.id} added.`});
-  // [END adminSdkAdd]
+  // 使用 OpenAI 解码该 sigil
+  const response = await decodeSigil(sigil);
+
+  // 存储返回回应
+  await db.collection("responses").add({
+    sigilId: sigilRef.id,
+    response,
+    createdAt: new Date(),
+  });
+
+  // 返回回应到前端
+  res.send({ sigil, response });
 });
-// [END addmessage]
 
-// [START makeuppercase]
-// Listens for new messages added to /messages/:documentId/original
-// and saves an uppercased version of the message
-// to /messages/:documentId/uppercase
-// [START makeuppercaseTrigger]
-exports.makeuppercase = onDocumentCreated("/messages/{documentId}", (event) => {
-  // [END makeuppercaseTrigger]
-  // [START makeUppercaseBody]
-  // Grab the current value of what was written to Firestore.
-  const original = event.data.data().original;
-
-  // Access the parameter `{documentId}` with `event.params`
-  logger.log("Uppercasing", event.params.documentId, original);
-
-  const uppercase = original.toUpperCase();
-
-  // You must return a Promise when performing
-  // asynchronous tasks inside a function
-  // such as writing to Firestore.
-  // Setting an 'uppercase' field in Firestore document returns a Promise.
-  return event.data.ref.set({uppercase}, {merge: true});
-  // [END makeUppercaseBody]
-});
-// [END makeuppercase]
-// [END all]
+// 🔗 暴露为 Firebase HTTPS Function
+exports.api = functions.https.onRequest(app);
